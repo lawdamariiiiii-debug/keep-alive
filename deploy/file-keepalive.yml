@@ -1,0 +1,129 @@
+name: File Keepalive
+
+on:
+  schedule:
+    # Run every 5 hours continuously to process files within GitHub Actions limits
+    # This ensures continuous operation with automatic restarts
+    - cron: '0 */5 * * *'
+  
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+    inputs:
+      dry_run:
+        description: 'Dry run mode (test without downloading files)'
+        required: false
+        type: boolean
+        default: false
+      max_age_days:
+        description: 'Only check files from last N days'
+        required: false
+        type: number
+        default: 30
+      reset_state:
+        description: 'Reset state and start fresh'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # 5 hours 50 minutes (leave 10 min buffer before 6hr limit)
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Restore state from cache
+        if: ${{ github.event.inputs.reset_state != 'true' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: file-keepalive/keepalive-state.json
+          key: keepalive-state-${{ github.run_id }}
+          restore-keys: |
+            keepalive-state-
+      
+      - name: Reset state if requested
+        if: ${{ github.event.inputs.reset_state == 'true' }}
+        working-directory: file-keepalive
+        run: |
+          echo "Resetting state..."
+          rm -f keepalive-state.json
+          echo "State reset complete"
+      
+      - name: Run keepalive check
+        working-directory: file-keepalive
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "Starting file keepalive service..."
+          echo "Dry run: ${{ github.event.inputs.dry_run || 'false' }}"
+          echo "Max age days: ${{ github.event.inputs.max_age_days || '30' }}"
+          
+          # Build flags based on inputs
+          FLAGS="-once"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            FLAGS="$FLAGS -dry-run"
+          fi
+          if [ -n "${{ github.event.inputs.max_age_days }}" ]; then
+            FLAGS="$FLAGS -max-age-days ${{ github.event.inputs.max_age_days }}"
+          fi
+          
+          # Run the keepalive service
+          # It will automatically resume from saved state if available
+          go run . $FLAGS || echo "Run completed or interrupted"
+      
+      - name: Save state to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: file-keepalive/keepalive-state.json
+          key: keepalive-state-${{ github.run_id }}
+      
+      - name: Upload state file as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepalive-state-${{ github.run_id }}
+          path: file-keepalive/keepalive-state.json
+          retention-days: 7
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepalive-logs-${{ github.run_id }}
+          path: |
+            file-keepalive/*.log
+          retention-days: 7
+      
+      - name: Check if more work needed
+        id: check_completion
+        if: always()
+        working-directory: file-keepalive
+        run: |
+          if [ -f keepalive-state.json ]; then
+            # Check if there are still unprocessed files
+            echo "State file exists, may need another run"
+            echo "needs_rerun=true" >> $GITHUB_OUTPUT
+          else
+            echo "No state file, work complete"
+            echo "needs_rerun=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Trigger next run if needed
+        if: steps.check_completion.outputs.needs_rerun == 'true' && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'file-keepalive.yml',
+              ref: context.ref
+            })

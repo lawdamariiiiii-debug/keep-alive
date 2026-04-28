@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  file-keepalive:
+    build: .
+    container_name: file-keepalive
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - INTERVAL_DAYS=7
+      - MAX_AGE_DAYS=30
+    # Optional: Mount .env file
+    # env_file:
+    #   - .env
+    
+    # Optional: Add logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

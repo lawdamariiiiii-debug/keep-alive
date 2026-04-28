@@ -1,0 +1,18 @@
+# Binaries
+file-keepalive
+file-keepalive.exe
+*.exe
+
+# Environment files
+.env
+
+# State files
+keepalive-state.json
+keepalive-state.json.tmp
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
