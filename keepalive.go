@@ -88,8 +88,14 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 	log.Println("========================================")
 
 	// Calculate cutoff date
-	cutoffDate := time.Now().AddDate(0, 0, -ks.maxAgeDays).Format("2006-01-02")
-	log.Printf("Checking files uploaded since: %s", cutoffDate)
+	var cutoffDate string
+	if ks.maxAgeDays > 0 {
+		cutoffDate = time.Now().AddDate(0, 0, -ks.maxAgeDays).Format("2006-01-02")
+		log.Printf("Checking files uploaded since: %s (%d days)", cutoffDate, ks.maxAgeDays)
+	} else {
+		cutoffDate = "1970-01-01" // Unix epoch - effectively all files
+		log.Printf("Checking ALL files (no date limit)")
+	}
 
 	// Test Supabase connection first
 	if err := ks.supabase.TestConnection(); err != nil {

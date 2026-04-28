@@ -18,7 +18,7 @@ func main() {
 	intervalDays := flag.Int("interval-days", 7, "Check interval in days")
 	runOnce := flag.Bool("once", false, "Run once and exit (don't loop)")
 	dryRun := flag.Bool("dry-run", false, "Dry run mode (don't actually access files)")
-	maxAgeDays := flag.Int("max-age-days", 30, "Only check files uploaded in the last N days")
+	maxAgeDays := flag.Int("max-age-days", 0, "Only check files uploaded in the last N days (0 = all files)")
 	delaySeconds := flag.Int("delay-seconds", 300, "Delay between file downloads in seconds (default: 300 = 5 minutes)")
 	
 	flag.Parse()
@@ -41,7 +41,12 @@ func main() {
 	log.Println("=== File Keepalive Service ===")
 	log.Printf("Supabase URL: %s", *supabaseURL)
 	log.Printf("Check Interval: %d days", *intervalDays)
-	log.Printf("Max File Age: %d days", *maxAgeDays)
+	if *maxAgeDays > 0 {
+		log.Printf("Max File Age: %d days", *maxAgeDays)
+	} else {
+		log.Printf("Max File Age: ALL files (no limit)")
+	}
+	log.Printf("Delay Between Files: %d seconds", *delaySeconds)
 	log.Printf("Run Once: %v", *runOnce)
 	log.Printf("Dry Run: %v", *dryRun)
 	log.Println("==============================")

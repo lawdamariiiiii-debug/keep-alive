@@ -2,9 +2,9 @@ name: File Keepalive
 
 on:
   schedule:
-    # Run once per day at 2 AM UTC (more conservative to avoid abuse detection)
-    # GitHub Actions is designed for CI/CD, not continuous services
-    # For production use, consider self-hosted runner or cloud VM
+    # Run once per day at 2 AM UTC to start the continuous loop
+    # Each run will automatically trigger the next one
+    # This creates a continuous processing cycle
     - cron: '0 2 * * *'
   
   workflow_dispatch:  # Allow manual trigger from GitHub UI
@@ -14,16 +14,16 @@ on:
         required: false
         type: boolean
         default: false
-      max_age_days:
-        description: 'Only check files from last N days'
-        required: false
-        type: number
-        default: 7  # Conservative default - only recent files
       reset_state:
-        description: 'Reset state and start fresh'
+        description: 'Reset state and start fresh (clear all progress)'
         required: false
         type: boolean
         default: false
+      continuous_loop:
+        description: 'Enable continuous loop (restart after completion)'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   keepalive:
@@ -62,19 +62,18 @@ jobs:
         run: |
           echo "Starting file keepalive service..."
           echo "Dry run: ${{ github.event.inputs.dry_run || 'false' }}"
-          echo "Max age days: ${{ github.event.inputs.max_age_days || '30' }}"
+          echo "Processing ALL files (no date limit)"
           
           # Build flags based on inputs
-          FLAGS="--once --delay-seconds=600"  # 10 min delay (conservative)
+          # No max-age-days limit - process ALL files
+          # State tracking ensures we resume from where we stopped
+          FLAGS="--once --delay-seconds=300"  # 5 min delay
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             FLAGS="$FLAGS --dry-run"
           fi
-          if [ -n "${{ github.event.inputs.max_age_days }}" ]; then
-            FLAGS="$FLAGS --max-age-days=${{ github.event.inputs.max_age_days }}"
-          fi
           
           # Run the keepalive service
-          # It will automatically resume from saved state if available
+          # State file tracks progress - will resume from last processed file
           go run . $FLAGS || echo "Run completed or interrupted"
       
       - name: Save state to cache
@@ -101,27 +100,43 @@ jobs:
             *.log
           retention-days: 7
       
-      - name: Check if more work needed
+      - name: Check if all files processed and reset for next cycle
         id: check_completion
         if: always()
         run: |
           if [ -f keepalive-state.json ]; then
-            # Check if there are still unprocessed files
-            echo "State file exists, may need another run"
-            echo "needs_rerun=true" >> $GITHUB_OUTPUT
+            # Check state file to see if we've processed files
+            FILES_COMPLETED=$(grep -o '"files_completed":[0-9]*' keepalive-state.json | grep -o '[0-9]*' || echo "0")
+            echo "Files completed in this run: $FILES_COMPLETED"
+            
+            if [ "$FILES_COMPLETED" -gt 0 ]; then
+              echo "Files were processed. Will continue in next run."
+              echo "needs_rerun=true" >> $GITHUB_OUTPUT
+            else
+              echo "No files processed. May be complete or error occurred."
+              echo "needs_rerun=true" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "No state file, work complete"
-            echo "needs_rerun=false" >> $GITHUB_OUTPUT
+            echo "No state file. Will start fresh in next run."
+            echo "needs_rerun=true" >> $GITHUB_OUTPUT
           fi
       
-      - name: Trigger next run if needed
-        if: steps.check_completion.outputs.needs_rerun == 'true' && github.event_name != 'workflow_dispatch'
+      - name: Trigger next run for continuous loop
+        if: steps.check_completion.outputs.needs_rerun == 'true' && (github.event_name == 'schedule' || github.event.inputs.continuous_loop == 'true')
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'file-keepalive.yml',
-              ref: context.ref
-            })
+            console.log('Triggering next workflow run for continuous processing...');
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'file-keepalive.yml',
+                ref: context.ref
+              });
+              console.log('Next run triggered successfully - continuous loop active');
+            } catch (error) {
+              console.log('Failed to trigger next run:', error.message);
+              console.log('Will retry on next scheduled run');
+            }
