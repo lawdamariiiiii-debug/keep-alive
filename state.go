@@ -57,6 +57,17 @@ func NewStateManager(stateFile string) *StateManager {
 		log.Printf("[StateManager] No existing state found, starting fresh: %v", err)
 	} else {
 		log.Printf("[StateManager] Loaded existing state: %d files processed", len(sm.state.ProcessedFiles))
+		
+		// Validate loaded state
+		if sm.state.ProcessedFiles == nil {
+			sm.state.ProcessedFiles = make(map[string]bool)
+		}
+		if sm.state.ProcessedOrder == nil {
+			sm.state.ProcessedOrder = make([]string, 0)
+		}
+		if sm.state.MaxProcessedFiles == 0 {
+			sm.state.MaxProcessedFiles = 10000
+		}
 	}
 
 	// Start auto-save goroutine
@@ -103,6 +114,13 @@ func (sm *StateManager) Save() error {
 	tempFile := sm.stateFile + ".tmp"
 	if err := os.WriteFile(tempFile, data, 0666); err != nil {
 		return fmt.Errorf("failed to write temp state file: %w", err)
+	}
+
+	// Create backup of existing state file before replacing
+	if _, err := os.Stat(sm.stateFile); err == nil {
+		backupFile := sm.stateFile + ".backup"
+		// Ignore backup errors - not critical
+		_ = os.Rename(sm.stateFile, backupFile)
 	}
 
 	if err := os.Rename(tempFile, sm.stateFile); err != nil {

@@ -80,6 +80,11 @@ func (sc *SupabaseClient) GetRecentRecordings(sinceDate string) ([]Recording, er
 
 	// Parse JSON
 	var recordings []Recording
+	if len(body) == 0 {
+		// Empty response means no recordings found
+		return []Recording{}, nil
+	}
+	
 	if err := json.Unmarshal(body, &recordings); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}

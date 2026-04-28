@@ -192,6 +192,12 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 		if len(rec.FilesterChunks) > 0 {
 			log.Printf("  Downloading %d Filester chunks...", len(rec.FilesterChunks))
 			for j, chunkURL := range rec.FilesterChunks {
+				// Skip empty chunk URLs
+				if chunkURL == "" {
+					log.Printf("    ⚠️  Chunk %d has empty URL, skipping", j+1)
+					continue
+				}
+				
 				if err := ks.accessFile(ctx, chunkURL, fmt.Sprintf("Filester-Chunk-%d", j+1), rec.ID); err != nil {
 					log.Printf("    ✗ Chunk %d failed: %v", j+1, err)
 					ks.stats.mu.Lock()
@@ -253,6 +259,16 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 // then immediately deletes it. This guarantees the file is marked as "downloaded"
 // on Gofile/Filester, resetting the inactivity timer.
 func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, recordingID string) error {
+	return ks.accessFileWithRetry(ctx, url, service, recordingID, 0)
+}
+
+// accessFileWithRetry handles file access with retry logic
+func (ks *KeepaliveService) accessFileWithRetry(ctx context.Context, url, service, recordingID string, attempt int) error {
+	// Validate URL
+	if url == "" {
+		return fmt.Errorf("empty URL provided")
+	}
+	
 	if ks.dryRun {
 		log.Printf("  [DRY RUN] Would download and delete %s: %s", service, url)
 		return nil
@@ -288,9 +304,9 @@ func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, record
 
 	// Check status code and handle retries
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		shouldRetry, retryDelay := ks.antiBot.ShouldRetry(resp.StatusCode, 0)
+		shouldRetry, retryDelay := ks.antiBot.ShouldRetry(resp.StatusCode, attempt)
 		if shouldRetry {
-			log.Printf("  ⚠️  Status %d, retrying after %v...", resp.StatusCode, retryDelay)
+			log.Printf("  ⚠️  Status %d, retrying after %v... (attempt %d/3)", resp.StatusCode, retryDelay, attempt+1)
 			
 			// Check if context is cancelled before sleeping
 			select {
@@ -301,7 +317,7 @@ func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, record
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return ks.accessFile(ctx, url, service, recordingID) // Retry
+				return ks.accessFileWithRetry(ctx, url, service, recordingID, attempt+1) // Retry with incremented attempt
 			}
 		}
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -321,12 +337,11 @@ func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, record
 	// Download the entire file to /dev/null (discard)
 	// Use a progress tracker to show download progress
 	written, err := io.Copy(io.Discard, &progressReader{
-		reader:        resp.Body,
-		total:         contentLength,
-		service:       service,
-		lastLogTime:   time.Now(),
-		lastLogBytes:  0,
-		stateManager:  ks.stateManager,
+		reader:       resp.Body,
+		total:        contentLength,
+		service:      service,
+		lastLogTime:  time.Now(),
+		lastLogBytes: 0,
 	})
 	
 	if err != nil {
@@ -340,7 +355,12 @@ func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, record
 	ks.stateManager.AddDownloaded(written)
 
 	duration := time.Since(startTime)
-	speed := float64(written) / duration.Seconds()
+	
+	// Avoid division by zero
+	var speed float64
+	if duration.Seconds() > 0 {
+		speed = float64(written) / duration.Seconds()
+	}
 
 	log.Printf("  ✓ %s downloaded: %s in %v (%.2f MB/s)", 
 		service, formatBytes(written), duration.Round(time.Second), speed/1024/1024)
@@ -355,13 +375,12 @@ func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, record
 
 // progressReader wraps an io.Reader to track download progress
 type progressReader struct {
-	reader        io.Reader
-	total         int64
-	downloaded    int64
-	service       string
-	lastLogTime   time.Time
-	lastLogBytes  int64
-	stateManager  *StateManager
+	reader       io.Reader
+	total        int64
+	downloaded   int64
+	service      string
+	lastLogTime  time.Time
+	lastLogBytes int64
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {

@@ -201,9 +201,10 @@ func (abm *AntiBotManager) LogRequest(service, url, userAgent string) {
 
 // RateLimiter tracks request rates to avoid triggering rate limits
 type RateLimiter struct {
-	requests      []time.Time
-	maxPerHour    int
-	maxPerMinute  int
+	mu           sync.Mutex
+	requests     []time.Time
+	maxPerHour   int
+	maxPerMinute int
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -217,6 +218,9 @@ func NewRateLimiter(maxPerHour, maxPerMinute int) *RateLimiter {
 
 // CanMakeRequest checks if a request can be made without exceeding limits
 func (rl *RateLimiter) CanMakeRequest() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
 	now := time.Now()
 	
 	// Clean old requests (older than 1 hour)
@@ -252,6 +256,8 @@ func (rl *RateLimiter) CanMakeRequest() bool {
 
 // RecordRequest records a new request
 func (rl *RateLimiter) RecordRequest() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 	rl.requests = append(rl.requests, time.Now())
 }
 

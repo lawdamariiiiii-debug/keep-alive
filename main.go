@@ -37,6 +37,16 @@ func main() {
 	if len(*supabaseKey) < 10 {
 		log.Fatal("Error: SUPABASE_KEY appears to be invalid (too short)")
 	}
+	
+	// Validate delay is non-negative
+	if *delaySeconds < 0 {
+		log.Fatal("Error: delay-seconds must be >= 0")
+	}
+	
+	// Validate max-age-days is non-negative
+	if *maxAgeDays < 0 {
+		log.Fatal("Error: max-age-days must be >= 0")
+	}
 
 	log.Println("=== File Keepalive Service ===")
 	log.Printf("Supabase URL: %s", *supabaseURL)
@@ -70,6 +80,9 @@ func main() {
 		log.Println("\nReceived shutdown signal, stopping...")
 		cancel()
 	}()
+
+	// Ensure state manager is stopped on exit
+	defer keepalive.stateManager.Stop()
 
 	// Run once or loop
 	if *runOnce {
