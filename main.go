@@ -15,6 +15,7 @@ func main() {
 	// Command-line flags
 	supabaseURL := flag.String("supabase-url", os.Getenv("SUPABASE_URL"), "Supabase project URL")
 	supabaseKey := flag.String("supabase-key", os.Getenv("SUPABASE_KEY"), "Supabase API key")
+	filesterToken := flag.String("filester-token", os.Getenv("FILESTER_API_KEY"), "Filester API bearer token (optional)")
 	intervalDays := flag.Int("interval-days", 7, "Check interval in days")
 	runOnce := flag.Bool("once", false, "Run once and exit (don't loop)")
 	dryRun := flag.Bool("dry-run", false, "Dry run mode (don't actually access files)")
@@ -50,6 +51,12 @@ func main() {
 
 	log.Println("=== File Keepalive Service ===")
 	log.Printf("Supabase URL: %s", *supabaseURL)
+	log.Println("Download Service: Filester only")
+	if *filesterToken != "" {
+		log.Printf("Filester Token: Configured")
+	} else {
+		log.Printf("Filester Token: Not configured (using public API)")
+	}
 	log.Printf("Check Interval: %d days", *intervalDays)
 	if *maxAgeDays > 0 {
 		log.Printf("Max File Age: %d days", *maxAgeDays)
@@ -64,8 +71,8 @@ func main() {
 	// Create Supabase client
 	supabase := NewSupabaseClient(*supabaseURL, *supabaseKey)
 
-	// Create keepalive service
-	keepalive := NewKeepaliveService(supabase, *dryRun, *maxAgeDays, *delaySeconds)
+	// Create keepalive service (no Gofile API key needed)
+	keepalive := NewKeepaliveService(supabase, *dryRun, *maxAgeDays, *delaySeconds, "", *filesterToken)
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,6 +90,9 @@ func main() {
 
 	// Ensure state manager is stopped on exit
 	defer keepalive.stateManager.Stop()
+	
+	// Ensure browser is closed on exit
+	defer keepalive.browserDownloader.Close()
 
 	// Run once or loop
 	if *runOnce {

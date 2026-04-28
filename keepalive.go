@@ -12,15 +12,16 @@ import (
 
 // KeepaliveService handles periodic file access to prevent deletion
 type KeepaliveService struct {
-	supabase     *SupabaseClient
-	httpClient   *http.Client
-	dryRun       bool
-	maxAgeDays   int
-	delaySeconds int
-	stats        *Stats
-	stateManager *StateManager
-	antiBot      *AntiBotManager
-	rateLimiter  *RateLimiter
+	supabase         *SupabaseClient
+	httpClient       *http.Client
+	browserDownloader *BrowserDownloader
+	dryRun           bool
+	maxAgeDays       int
+	delaySeconds     int
+	stats            *Stats
+	stateManager     *StateManager
+	antiBot          *AntiBotManager
+	rateLimiter      *RateLimiter
 }
 
 // Stats tracks keepalive statistics
@@ -39,18 +40,27 @@ type Stats struct {
 }
 
 // NewKeepaliveService creates a new keepalive service
-func NewKeepaliveService(supabase *SupabaseClient, dryRun bool, maxAgeDays int, delaySeconds int) *KeepaliveService {
+func NewKeepaliveService(supabase *SupabaseClient, dryRun bool, maxAgeDays int, delaySeconds int, gofileAPIKey, filesterToken string) *KeepaliveService {
+	antiBot := NewAntiBotManager()
+	
+	// Create browser downloader
+	browserDownloader, err := NewBrowserDownloader(antiBot, gofileAPIKey, filesterToken)
+	if err != nil {
+		log.Fatalf("Failed to create browser downloader: %v", err)
+	}
+	
 	return &KeepaliveService{
 		supabase: supabase,
 		httpClient: &http.Client{
 			Timeout: 0, // No timeout for large downloads (intentional for large files)
 		},
-		dryRun:       dryRun,
-		maxAgeDays:   maxAgeDays,
-		delaySeconds: delaySeconds,
-		stateManager: NewStateManager("keepalive-state.json"),
-		antiBot:      NewAntiBotManager(),
-		rateLimiter:  NewRateLimiter(100, 5), // Max 100/hour, 5/minute
+		browserDownloader: browserDownloader,
+		dryRun:            dryRun,
+		maxAgeDays:        maxAgeDays,
+		delaySeconds:      delaySeconds,
+		stateManager:      NewStateManager("keepalive-state.json"),
+		antiBot:           antiBot,
+		rateLimiter:       NewRateLimiter(100, 5), // Max 100/hour, 5/minute
 		stats: &Stats{
 			StartTime: time.Now(),
 		},
@@ -59,6 +69,9 @@ func NewKeepaliveService(supabase *SupabaseClient, dryRun bool, maxAgeDays int, 
 
 // StartLoop runs the keepalive check in a loop
 func (ks *KeepaliveService) StartLoop(ctx context.Context, interval time.Duration) {
+	// Ensure browser is closed on exit
+	defer ks.browserDownloader.Close()
+	
 	// Run immediately on start
 	if err := ks.CheckAllFiles(ctx); err != nil {
 		log.Printf("Error during initial keepalive check: %v", err)
@@ -150,23 +163,9 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 
 		fileSuccess := true
 
-		// Download Gofile URL
+		// Skip Gofile URLs (using Filester only)
 		if rec.GofileURL != "" {
-			if err := ks.accessFile(ctx, rec.GofileURL, "Gofile", rec.ID); err != nil {
-				log.Printf("  ✗ Gofile download failed: %v", err)
-				ks.stats.mu.Lock()
-				ks.stats.GofileFailed++
-				ks.stats.mu.Unlock()
-				fileSuccess = false
-			} else {
-				log.Printf("  ✓ Gofile downloaded successfully")
-				ks.stats.mu.Lock()
-				ks.stats.GofileSuccess++
-				ks.stats.mu.Unlock()
-				ks.stateManager.IncrementGofile()
-			}
-		} else {
-			log.Printf("  - Gofile URL not available")
+			log.Printf("  - Skipping Gofile URL (using Filester only)")
 		}
 
 		// Download Filester URL
@@ -255,14 +254,14 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 	return nil
 }
 
-// accessFile fully downloads the file to ensure it counts as a complete download,
-// then immediately deletes it. This guarantees the file is marked as "downloaded"
-// on Gofile/Filester, resetting the inactivity timer.
+// accessFile fully downloads the file using browser automation to ensure it counts 
+// as a complete download, then immediately deletes it. This guarantees the file is 
+// marked as "downloaded" on Gofile/Filester, resetting the inactivity timer.
 func (ks *KeepaliveService) accessFile(ctx context.Context, url, service, recordingID string) error {
 	return ks.accessFileWithRetry(ctx, url, service, recordingID, 0)
 }
 
-// accessFileWithRetry handles file access with retry logic
+// accessFileWithRetry handles file access with retry logic using browser automation
 func (ks *KeepaliveService) accessFileWithRetry(ctx context.Context, url, service, recordingID string, attempt int) error {
 	// Validate URL
 	if url == "" {
@@ -277,75 +276,29 @@ func (ks *KeepaliveService) accessFileWithRetry(ctx context.Context, url, servic
 	// Check rate limiter
 	ks.rateLimiter.WaitIfNeeded()
 	
-	// Simulate human behavior (random micro-delay)
-	ks.antiBot.SimulateHumanBehavior()
-
 	log.Printf("  Downloading %s file...", service)
 	startTime := time.Now()
 
-	// Create GET request to download the full file
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Use browser downloader to handle the file
+	written, err := ks.browserDownloader.DownloadFile(ctx, url, service)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Add realistic anti-bot headers
-	ks.antiBot.AddRealisticHeaders(req)
-	ks.antiBot.LogRequest(service, url, req.Header.Get("User-Agent"))
-
-	// Record request for rate limiting
-	ks.rateLimiter.RecordRequest()
-
-	resp, err := ks.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check status code and handle retries
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		shouldRetry, retryDelay := ks.antiBot.ShouldRetry(resp.StatusCode, attempt)
+		// Check if we should retry
+		shouldRetry := attempt < 3
 		if shouldRetry {
-			log.Printf("  ⚠️  Status %d, retrying after %v... (attempt %d/3)", resp.StatusCode, retryDelay, attempt+1)
+			retryDelay := time.Duration(10*(attempt+1)) * time.Second
+			log.Printf("  ⚠️  Download failed, retrying after %v... (attempt %d/3): %v", retryDelay, attempt+1, err)
 			
-			// Check if context is cancelled before sleeping
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(retryDelay):
-				// Check context again before retry
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return ks.accessFileWithRetry(ctx, url, service, recordingID, attempt+1) // Retry with incremented attempt
+				return ks.accessFileWithRetry(ctx, url, service, recordingID, attempt+1)
 			}
 		}
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	// Get file size from Content-Length header
-	contentLength := resp.ContentLength
-	var sizeStr string
-	if contentLength > 0 {
-		sizeStr = formatBytes(contentLength)
-	} else {
-		sizeStr = "unknown size"
-	}
-
-	log.Printf("  Downloading %s (%s)...", service, sizeStr)
-
-	// Download the entire file to /dev/null (discard)
-	// Use a progress tracker to show download progress
-	written, err := io.Copy(io.Discard, &progressReader{
-		reader:       resp.Body,
-		total:        contentLength,
-		service:      service,
-		lastLogTime:  time.Now(),
-		lastLogBytes: 0,
-	})
-	
-	if err != nil {
-		return fmt.Errorf("download failed after %s: %w", formatBytes(written), err)
+		return fmt.Errorf("download failed after %d attempts: %w", attempt+1, err)
 	}
 
 	// Track total downloaded
@@ -365,10 +318,14 @@ func (ks *KeepaliveService) accessFileWithRetry(ctx context.Context, url, servic
 	log.Printf("  ✓ %s downloaded: %s in %v (%.2f MB/s)", 
 		service, formatBytes(written), duration.Round(time.Second), speed/1024/1024)
 
-	// Update last_accessed in Supabase
+	// Update last_accessed in Supabase (optional - requires last_accessed column)
 	if err := ks.supabase.UpdateLastAccessed(recordingID); err != nil {
-		log.Printf("  ⚠️  Warning: Failed to update last_accessed timestamp: %v", err)
+		// Silently skip if column doesn't exist (PGRST204 error)
+		// This is non-critical - the file was still accessed successfully
 	}
+
+	// Record request for rate limiting
+	ks.rateLimiter.RecordRequest()
 
 	return nil
 }
@@ -435,7 +392,6 @@ func (ks *KeepaliveService) PrintStats() {
 	log.Println("KEEPALIVE STATISTICS")
 	log.Println("========================================")
 	log.Printf("Total Recordings: %d", ks.stats.TotalFiles)
-	log.Printf("Gofile:   ✓ %d  ✗ %d", ks.stats.GofileSuccess, ks.stats.GofileFailed)
 	log.Printf("Filester: ✓ %d  ✗ %d", ks.stats.FilesterSuccess, ks.stats.FilesterFailed)
 	if ks.stats.ChunksSuccess > 0 || ks.stats.ChunksFailed > 0 {
 		log.Printf("Chunks:   ✓ %d  ✗ %d", ks.stats.ChunksSuccess, ks.stats.ChunksFailed)
@@ -456,7 +412,6 @@ func (ks *KeepaliveService) PrintFinalStats() {
 	log.Println("========================================")
 	log.Printf("Service Uptime: %s", uptime.Round(time.Second))
 	log.Printf("Total Recordings Processed: %d", ks.stats.TotalFiles)
-	log.Printf("Gofile:   ✓ %d  ✗ %d", ks.stats.GofileSuccess, ks.stats.GofileFailed)
 	log.Printf("Filester: ✓ %d  ✗ %d", ks.stats.FilesterSuccess, ks.stats.FilesterFailed)
 	if ks.stats.ChunksSuccess > 0 || ks.stats.ChunksFailed > 0 {
 		log.Printf("Chunks:   ✓ %d  ✗ %d", ks.stats.ChunksSuccess, ks.stats.ChunksFailed)
