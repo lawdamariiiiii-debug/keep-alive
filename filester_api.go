@@ -242,7 +242,7 @@ func (f *FilesterAPI) downloadFile(ctx context.Context, url string) (int64, erro
 
 	log.Printf("  Downloading (%s)...", sizeStr)
 
-	// Download to /dev/null (discard)
+	// Download to memory and discard (keepalive - no disk usage)
 	written, err := io.Copy(io.Discard, &progressReader{
 		reader:       resp.Body,
 		total:        contentLength,

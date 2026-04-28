@@ -10,7 +10,13 @@ import (
 	"time"
 )
 
-// KeepaliveService handles periodic file access to prevent deletion
+// KeepaliveService handles periodic file access to prevent deletion.
+//
+// How it works:
+// - Downloads files from Filester by streaming them to io.Discard (memory only)
+// - This registers as a "download" on Filester's servers, resetting the inactivity timer
+// - No files are saved to disk, preventing storage issues
+// - The service tracks bytes transferred for statistics but discards the actual data
 type KeepaliveService struct {
 	supabase         *SupabaseClient
 	httpClient       *http.Client
@@ -177,7 +183,7 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 				ks.stats.mu.Unlock()
 				fileSuccess = false
 			} else {
-				log.Printf("  ✓ Filester downloaded successfully")
+				log.Printf("  ✓ Filester keepalive successful")
 				ks.stats.mu.Lock()
 				ks.stats.FilesterSuccess++
 				ks.stats.mu.Unlock()
@@ -204,7 +210,7 @@ func (ks *KeepaliveService) CheckAllFiles(ctx context.Context) error {
 					ks.stats.mu.Unlock()
 					fileSuccess = false
 				} else {
-					log.Printf("    ✓ Chunk %d downloaded", j+1)
+					log.Printf("    ✓ Chunk %d keepalive successful", j+1)
 					ks.stats.mu.Lock()
 					ks.stats.ChunksSuccess++
 					ks.stats.mu.Unlock()
@@ -315,7 +321,7 @@ func (ks *KeepaliveService) accessFileWithRetry(ctx context.Context, url, servic
 		speed = float64(written) / duration.Seconds()
 	}
 
-	log.Printf("  ✓ %s downloaded: %s in %v (%.2f MB/s)", 
+	log.Printf("  ✓ %s keepalive complete: %s streamed in %v (%.2f MB/s) - file discarded", 
 		service, formatBytes(written), duration.Round(time.Second), speed/1024/1024)
 
 	// Update last_accessed in Supabase (optional - requires last_accessed column)
