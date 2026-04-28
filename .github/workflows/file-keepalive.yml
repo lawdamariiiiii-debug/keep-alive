@@ -2,9 +2,10 @@ name: File Keepalive
 
 on:
   schedule:
-    # Run every 5 hours continuously to process files within GitHub Actions limits
-    # This ensures continuous operation with automatic restarts
-    - cron: '0 */5 * * *'
+    # Run once per day at 2 AM UTC (more conservative to avoid abuse detection)
+    # GitHub Actions is designed for CI/CD, not continuous services
+    # For production use, consider self-hosted runner or cloud VM
+    - cron: '0 2 * * *'
   
   workflow_dispatch:  # Allow manual trigger from GitHub UI
     inputs:
@@ -17,7 +18,7 @@ on:
         description: 'Only check files from last N days'
         required: false
         type: number
-        default: 30
+        default: 7  # Conservative default - only recent files
       reset_state:
         description: 'Reset state and start fresh'
         required: false
@@ -27,7 +28,7 @@ on:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # 5 hours 50 minutes (leave 10 min buffer before 6hr limit)
+    timeout-minutes: 120  # 2 hours max (conservative limit)
     
     steps:
       - name: Checkout code
@@ -64,7 +65,7 @@ jobs:
           echo "Max age days: ${{ github.event.inputs.max_age_days || '30' }}"
           
           # Build flags based on inputs
-          FLAGS="--once"
+          FLAGS="--once --delay-seconds=600"  # 10 min delay (conservative)
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             FLAGS="$FLAGS --dry-run"
           fi
